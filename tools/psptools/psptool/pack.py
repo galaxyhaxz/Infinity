@@ -80,7 +80,7 @@ class PSPHeader:
         self.version = 1
 
         # set compression to gzip
-        self.comp_attribute = 1
+        self.comp_attribute = 0
         self.module_ver_lo = modinfo.modversion & 0xFF
         self.module_ver_hi = (modinfo.modversion >> 8) & 0xFF
         self.modname = modinfo.modname
@@ -102,8 +102,8 @@ class PSPHeader:
         self.devkitversion = 0
 
         if modinfo.is_kernel():
-            self.devkitversion = 0x06060110 if self.attribute & 0x2000 else 0x05070110
-            self.decrypt_mode = 2
+            # self.devkitversion = 0x06060110 if self.attribute & 0x2000 else 0x05070110
+            self.decrypt_mode = 1
 
         elif is_pbp:
             # check if VSH API (updater)
@@ -121,6 +121,8 @@ class PSPHeader:
             # set to MS API
             else:
                 # TODO: could check the SFO for POPS...
+                # MS games must set attribute to 0x200 for firmware 2.00+
+                # On firmware <2.00 it must be set to 0
                 self.attribute |= 0x200
                 self.decrypt_mode = 0xD
 
@@ -161,6 +163,54 @@ class PSPHeader:
                            self.reserved2, *self.key_data1, self.psptag,
                            *self.signcheck, self.key_data2, self.oetag, *self.key_data3)
 
+
+class PSPBootHeader:
+    def __init__(self, executable):
+        self.attribute = 0x1000
+        self.modinfo_offset = 0
+        self.version = 1
+
+        # set compression to gzip
+        self.comp_attribute = 0
+        self.module_ver_lo = 0
+        self.module_ver_hi = 0
+        self.modname = ""
+        self.elf_size = len(executable)
+
+        self.entry = 0
+        self.nsegments = 0
+        self.seg_align = [0]*4
+        self.seg_address = [0]*4
+        self.seg_size = [0]*4
+        self.bss_size = 0
+        self.devkitversion = 0
+        self.decrypt_mode = 1
+
+        # to be filled in by caller
+        self.psptag = None
+        self.oetag = None
+        self.comp_size = None
+        self.psp_size = None
+
+        self.reserved = [0]*5
+        self.key_data0 = [0xDA]*0x30
+        self.reserved2 = [0]*2
+        self.key_data1 = [0xDA]*0x10
+        self.signcheck = [0]*0x58
+        self.key_data2 = 0
+        self.key_data3 = [0xDA]*0x1C
+
+    def pack(self):
+        return struct.pack('<IHHBB28sBBIIIII4H4I4I5IIBxH48BII2I16BI88BII28B',
+                           PSP_HEADER_MAGIC, self.attribute, self.comp_attribute, self.module_ver_lo, self.module_ver_hi,
+                           self.modname.encode(
+                               'ascii'), self.version, self.nsegments, self.elf_size, self.psp_size, self.entry,
+                           self.modinfo_offset, self.bss_size, *
+                           self.seg_align, *self.seg_address, *self.seg_size,
+                           *self.reserved, self.devkitversion, self.decrypt_mode, 0,
+                           *self.key_data0, self.comp_size, 0x80, *
+                           self.reserved2, *self.key_data1, self.psptag,
+                           *self.signcheck, self.key_data2, self.oetag, *self.key_data3)
 
 def determine_exec_type(modinfo, is_pbp):
     if is_pbp:
@@ -239,15 +289,28 @@ def pack_prx(executable, is_pbp, fix_relocs=True, psptag=psptag_default, oetag=o
         print("conflict module attribute {:X} vs {:X}".format(
             psp_header.attribute, modinfo.modattribute))
 
-    compressed_exec = gzip.compress(executable)
+    # compressed_exec = gzip.compress(executable)
     padding = padding = b'\x00' * \
-        (0x10-(len(compressed_exec) % 16)) if len(compressed_exec) % 16 else b''
+        (0x10-(len(executable) % 16)) if len(executable) % 16 else b''
 
-    psp_header.comp_size = len(compressed_exec)
-    psp_header.psp_size = len(compressed_exec) + len(padding) + 0x150
+    psp_header.comp_size = len(executable)
+    psp_header.psp_size = len(executable) + len(padding) + 0x150
 
     exec_type = determine_exec_type(modinfo, is_pbp)
     psp_header.psptag = psptag(exec_type)
     psp_header.oetag = oetag(exec_type)
 
-    return psp_header.pack() + compressed_exec
+    return psp_header.pack() + executable
+
+def pack_btcnf(executable, psptag=0xDADADAF0, oetag=0x55668D96):
+    psp_header = PSPBootHeader(executable)
+
+    padding = padding = b'\x00' * \
+        (0x10-(len(executable) % 16)) if len(executable) % 16 else b''
+
+    psp_header.comp_size = len(executable)
+    psp_header.psp_size = len(executable) + len(padding) + 0x150
+    psp_header.psptag = psptag
+    psp_header.oetag = oetag
+
+    return psp_header.pack() + executable
